@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>FleetCore</title>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'DM Sans', sans-serif; background: #f3f4f6; }
+    select option { background: #fff; color: #111; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeUp { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const SUPABASE_URL = "https://yultyqsymetgsbtirxfw.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1bHR5cXN5bWV0Z3NidGlyeGZ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1MzIzNTMsImV4cCI6MjA5NDEwODM1M30.2VU7wOxtG8-NrFwgmjofNp15sE3nsmguFXR9Rcpp-60";
+    const H = { "Content-Type": "application/json", "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Prefer": "return=representation" };
+
+    const db = {
+      async get(table) {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?order=created_at`, { headers: H });
+        if (!r.ok) throw new Error(await r.text());
+        return r.json();
+      },
+      async insert(table, row) {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, { method: "POST", headers: H, body: JSON.stringify(row) });
+        if (!r.ok) throw new Error(await r.text());
+        return r.json();
+      },
+      async update(table, id, data) {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, { method: "PATCH", headers: H, body: JSON.stringify(data) });
+        if (!r.ok) throw new Error(await r.text());
+        return r.json();
+      },
+      async remove(table, id) {
+        const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, { method: "DELETE", headers: H });
+        if (!r.ok) throw new Error(await r.text());
+      },
+    };
+
+    const mapV  = r => ({ id:r.id, vin:r.vin, year:r.year, make:r.make, model:r.model, plate:r.plate, color:r.color, status:r.status, leaseEnd:r.lease_end||"", regDue:r.reg_due||"" });
+    const mapO  = r => ({ id:r.id, vehicleId:r.vehicle_id, lastChangeDate:r.last_change_date, lastChangeMileage:r.last_change_mileage, currentMileage:r.current_mileage, intervalMiles:r.interval_miles, intervalDays:r.interval_days, oilType:r.oil_type });
+    const mapD  = r => ({ id:r.id, vehicleId:r.vehicle_id, type:r.type, task:r.task, date:r.date, notes:r.notes||"" });
+
+    const TODAY = new Date();
+    const daysUntil = d => Math.ceil((new Date(d) - TODAY) / 86400000);
+    const fmt = d => new Date(d).toLocaleDateString("en-US", { month:"short", day:"numeric", year:"numeric" });
+
+    const oilStatus = o => {
+      const milesDriven = o.currentMileage - o.lastChangeMileage;
+      const milesLeft   = o.intervalMiles - milesDriven;
+      const milePct     = Math.min(100, Math.round((milesDriven / o.intervalMiles) * 100));
+      const daysSince   = Math.floor((TODAY - new Date(o.lastChangeDate)) / 86400000);
+      const daysLeft    = o.intervalDays - daysSince;
+      const timePct     = Math.min(100, Math.round((daysSince / o.intervalDays) * 100));
+      const overallPct  = Math.max(milePct, timePct);
+      const triggeredBy = milePct >= timePct ? "mileage" : "time";
+      let urgency, urgencyColor, urgencyBg, urgencyBorder;
+      if (overallPct >= 100)     { urgency="OVERDUE";  urgencyColor="#dc2626"; urgencyBg="#fef2f2"; urgencyBorder="#fca5a5"; }
+      else if (overallPct >= 85) { urgency="DUE SOON"; urgencyColor="#c2410c"; urgencyBg="#fff7ed"; urgencyBorder="#fdba74"; }
+      else if (overallPct >= 70) { urgency="WATCH";    urgencyColor="#d97706"; urgencyBg="#fffbeb"; urgencyBorder="#fde68a"; }
+      else                       { urgency="OK";        urgencyColor="#059669"; urgencyBg="#ecfdf5"; urgencyBorder="#a7f3d0"; }
+      return { milesDriven, milesLeft, milePct, daysSince, daysLeft, timePct, overallPct, triggeredBy, urgency, urgencyColor, urgencyBg, urgencyBorder };
+    };
+
+    const TYPE_CFG = {
+      maintenance:  { label:"Maintenance",  icon:"🔧", color:"#d97706", bg:"#fffbeb", border:"#fde68a" },
+      registration: { label:"Registration", icon:"📋", color:"#059669", bg:"#ecfdf5", border:"#a7f3d0" },
+      lease:        { label:"Lease Return", icon:"🔑", color:"#7c3aed", bg:"#f5f3ff", border:"#ddd6fe" },
+    };
+    const STATUS_CFG = {
+      available:   { color:"#059669", bg:"#ecfdf5", border:"#a7f3d0", label:"Available" },
+      rented:      { color:"#2563eb", bg:"#eff6ff", border:"#bfdbfe", label:"Rented" },
+      maintenance: { color:"#dc2626", bg:"#fef2f2", border:"#fecaca", label:"In Service" },
+    };
+    const urgencyOf = days => {
+      if (days < 0)   return { label:"OVERDUE",    color:"#dc2626", bg:"#fef2f2", border:"#fca5a5" };
+      if (days <= 7)  return { label:"THIS WEEK",  color:"#c2410c", bg:"#fff7ed", border:"#fdba74" };
+      if (days <= 14) return { label:"NEXT 2 WKS", color:"#d97706", bg:"#fffbeb", border:"#fde68a" };
+      if (days <= 30) return { label:"THIS MONTH", color:"#ca8a04", bg:"#fefce8", border:"#fef08a" };
+      return              { label:"UPCOMING",      color:"#6b7280", bg:"#f9fafb", border:"#e5e7eb" };
+    };
+
+    const INPUT = { background:"#fff", border:"1px solid #d1d5db", borderRadius:8, padding:"9px 13px", color:"#111827", fontFamily:"'DM Sans',sans-serif", fontSize:13, width:"100%", outline:"none" };
+    const LABEL = { fontSize:10, color:"#6b7280", textTransform:"uppercase", letterSpacing:1.2, marginBottom:5, display:"block", fontFamily:"'DM Sans',sans-serif", fontWeight:600 };
+    const BTN_P = { background:"#2563eb", color:"#fff", border:"none", borderRadius:8, padding:"9px 20px", fontFamily:"'DM Sans',sans-serif", fontWeight:700, fontSize:13, cursor:"pointer" };
+    const BTN_G = { background:"#fff", color:"#374151", border:"1px solid #d1d5db", borderRadius:8, padding:"9px 16px", fontFamily:"'DM Sans',sans-serif", fontSize:13, cursor:"pointer" };
+
+    function Modal({ title, onClose, children }) {
+      return (
+        <div style={{ position:"fixed", inset:0, background:"#00000055", zIndex:300, display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+          <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:16, padding:30, width:"100%", maxWidth:540, maxHeight:"90vh", overflowY:"auto", boxShadow:"0 20px 60px rgba(0,0,0,0.15)" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
+              <span style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:20, fontWeight:800, letterSpacing:1.5, color:"#111827" }}>{title}</span>
+              <button onClick={onClose} style={{ background:"transparent", border:"none", color:"#9ca3af", fontSize:22, cursor:"pointer" }}>×</button>
+            </div>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    function Field({ label, span, children }) {
+      return (
+        <div style={span ? { gridColumn:`span ${span}` } : {}}>
+          <label style={LABEL}>{label}</label>
+          {children}
+        </div>
+      );
+    }
+
+    function ProgressBar({ pct }) {
+      const bg = pct >= 100 ? "#dc2626" : pct >= 85 ? "#c2410c" : pct >= 70 ? "#d97706" : "#059669";
+      return (
+        <div style={{ width:"100%", height:7, background:"#f3f4f6", borderRadius:10, overflow:"hidden" }}>
+          <div style={{ width:`${Math.min(100,pct)}%`, height:"100%", background:bg, borderRadius:10 }}/>
+        </div>
+      );
+    }
+
+    function OilChangeCard({ record, vehicle, onLogChange }) {
+      const s = oilStatus(record);
+      const [hov, setHov] = useState(false);
+      return (
+        <div onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+          style={{ background:"#fff", border:`1px solid ${s.urgencyBorder}`, borderRadius:12, padding:"18px 20px", boxShadow:"0 1px 4px rgba(0,0,0,0.06)", position:"relative", overflow:"hidden" }}>
+          <div style={{ position:"absolute", top:0, left:0, right:0, height:3, background:s.urgencyColor, opacity:s.overallPct>=70?1:0 }}/>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:12 }}>
+            <div>
+              <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:16, fontWeight:800, color:"#111827" }}>{vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : "Unknown"}</div>
+              <div style={{ fontSize:11, color:"#6b7280", marginTop:1 }}>{vehicle?.plate} · {record.oilType}</div>
+            </div>
+            <span style={{ background:s.urgencyBg, color:s.urgencyColor, border:`1px solid ${s.urgencyBorder}`, fontSize:10, fontWeight:800, padding:"3px 10px", borderRadius:20 }}>{s.urgency}</span>
+          </div>
+          <div style={{ marginBottom:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+              <span style={{ fontSize:11, fontWeight:700, color:"#374151" }}>🛣 Mileage</span>
+              <span style={{ fontSize:11, color:s.milePct>=85?"#dc2626":"#6b7280" }}>{s.milesDriven.toLocaleString()} / {record.intervalMiles.toLocaleString()} mi · <strong>{s.milesLeft > 0 ? `${s.milesLeft.toLocaleString()} left` : `${Math.abs(s.milesLeft).toLocaleString()} over`}</strong></span>
+            </div>
+            <ProgressBar pct={s.milePct}/>
+          </div>
+          <div style={{ marginBottom:14 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+              <span style={{ fontSize:11, fontWeight:700, color:"#374151" }}>📅 Time</span>
+              <span style={{ fontSize:11, color:s.timePct>=85?"#dc2626":"#6b7280" }}>{s.daysSince}d since last change · <strong>{s.daysLeft > 0 ? `${s.daysLeft}d left` : `${Math.abs(s.daysLeft)}d over`}</strong></span>
+            </div>
+            <ProgressBar pct={s.timePct}/>
+          </div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ fontSize:10, color:"#9ca3af" }}>Triggered by: <strong style={{ color:"#374151" }}>{s.triggeredBy}</strong> · {record.currentMileage.toLocaleString()} mi</span>
+            {hov && <button onClick={() => onLogChange(record)} style={{ background:"#ecfdf5", color:"#059669", border:"1px solid #a7f3d0", borderRadius:6, padding:"5px 12px", fontSize:11, fontWeight:700, cursor:"pointer" }}>✓ Log Oil Change</button>}
+          </div>
+        </div>
+      );
+    }
+
+    function DeadlineRow({ item, vehicle, onDone }) {
+      const days = daysUntil(item.date);
+      const t = TYPE_CFG[item.type];
+      const u = urgencyOf(days);
+      const [hov, setHov] = useState(false);
+      return (
+        <div onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+          style={{ display:"flex", alignItems:"center", gap:12, background:hov?"#f9fafb":"#fff", border:`1px solid ${u.border}`, borderLeft:`4px solid ${t.color}`, borderRadius:10, padding:"12px 15px", marginBottom:7, transition:"all 0.15s", boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
+          <span style={{ fontSize:18, flexShrink:0 }}>{t.icon}</span>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:7, flexWrap:"wrap" }}>
+              <span style={{ fontSize:13, fontWeight:700, color:"#111827", fontFamily:"'Barlow Condensed',sans-serif" }}>{vehicle ? `${vehicle.year} ${vehicle.make} ${vehicle.model}` : "Unknown"}</span>
+              {vehicle && <span style={{ fontSize:10, color:"#6b7280", background:"#f3f4f6", borderRadius:4, padding:"1px 7px", fontWeight:600 }}>{vehicle.plate}</span>}
+              <span style={{ background:u.bg, color:u.color, border:`1px solid ${u.border}`, fontSize:9, fontWeight:800, letterSpacing:1, padding:"2px 7px", borderRadius:4 }}>{u.label}</span>
+            </div>
+            <div style={{ display:"flex", gap:12, marginTop:3, flexWrap:"wrap" }}>
+              <span style={{ fontSize:12, color:t.color, fontWeight:600 }}>{item.task}</span>
+              <span style={{ fontSize:11, color:"#6b7280" }}>{fmt(item.date)}</span>
+              {item.notes && <span style={{ fontSize:11, color:"#9ca3af" }}>{item.notes}</span>}
+            </div>
+          </div>
+          <div style={{ textAlign:"right", minWidth:56, flexShrink:0 }}>
+            <div style={{ fontSize:22, fontWeight:800, color:u.color, fontFamily:"'Barlow Condensed',sans-serif", lineHeight:1 }}>{Math.abs(days)}</div>
+            <div style={{ fontSize:9, color:u.color, opacity:0.7, textTransform:"uppercase", letterSpacing:1 }}>{days<0?"ago":days===0?"TODAY":"days"}</div>
+          </div>
+          {hov && <button onClick={() => onDone(item.id)} style={{ background:"#ecfdf5", color:"#059669", border:"1px solid #a7f3d0", borderRadius:6, padding:"5px 10px", fontSize:10, fontWeight:700, cursor:"pointer", flexShrink:0 }}>DONE ✓</button>}
+        </div>
+      );
+    }
+
+    function App() {
+      const [vehicles,   setVehicles]   = useState([]);
+      const [oilRecords, setOilRecords] = useState([]);
+      const [deadlines,  setDeadlines]  = useState([]);
+      const [loading,    setLoading]    = useState(true);
+      const [saving,     setSaving]     = useState(false);
+      const [dbError,    setDbError]    = useState(null);
+      const [view,       setView]       = useState("command");
+      const [typeFilter, setTypeFilter] = useState("all");
+      const [oilFilter,  setOilFilter]  = useState("all");
+      const [toast,      setToast]      = useState(null);
+      const [showAddV,   setShowAddV]   = useState(false);
+      const [showAddD,   setShowAddD]   = useState(false);
+      const [showLogOil, setShowLogOil] = useState(false);
+      const [selOilRec,  setSelOilRec]  = useState(null);
+
+      const blankV = { vin:"", year:"", make:"", model:"", plate:"", color:"", status:"available", leaseEnd:"", regDue:"", oilLastDate:"", oilLastMileage:"", oilCurrentMileage:"", oilIntervalMiles:"5000", oilIntervalDays:"90", oilType:"Synthetic 5W-30" };
+      const blankD = { vehicleId:"", type:"maintenance", task:"", date:"", notes:"" };
+      const [vF, setVF] = useState(blankV);
+      const [dF, setDF] = useState(blankD);
+      const [logF, setLogF] = useState({ newMileage:"", changeDate:"", notes:"" });
+
+      const toast2 = (m, err) => { setToast({ msg:m, err:!!err }); setTimeout(() => setToast(null), 3000); };
+      const vById = id => vehicles.find(v => v.id === id);
+
+      const loadAll = useCallback(async () => {
+        setLoading(true); setDbError(null);
+        try {
+          const [vs, os, ds] = await Promise.all([db.get("vehicles"), db.get("oil_records"), db.get("deadlines")]);
+          setVehicles(vs.map(mapV));
+          setOilRecords(os.map(mapO));
+          setDeadlines(ds.map(mapD));
+        } catch(e) {
+          setDbError("Could not connect to database: " + e.message);
+        } finally {
+          setLoading(false);
+        }
+      }, []);
+
+      useEffect(() => { loadAll(); }, [loadAll]);
+
+      const addVehicle = async () => {
+        if (!vF.vin || !vF.make || !vF.model || !vF.plate) return;
+        setSaving(true);
+        try {
+          const id = "v" + Date.now();
+          await db.insert("vehicles", { id, vin:vF.vin, year:parseInt(vF.year)||2024, make:vF.make, model:vF.model, plate:vF.plate, color:vF.color, status:vF.status, lease_end:vF.leaseEnd||null, reg_due:vF.regDue||null });
+          const ts = Date.now();
+          if (vF.regDue)   await db.insert("deadlines", { id:"d"+ts+"r", vehicle_id:id, type:"registration", task:"Annual Registration", date:vF.regDue, notes:"" });
+          if (vF.leaseEnd) await db.insert("deadlines", { id:"d"+ts+"l", vehicle_id:id, type:"lease", task:"Lease Return", date:vF.leaseEnd, notes:"" });
+          if (vF.oilLastDate && vF.oilLastMileage && vF.oilCurrentMileage) {
+            await db.insert("oil_records", { id:"o"+ts, vehicle_id:id, last_change_date:vF.oilLastDate, last_change_mileage:parseInt(vF.oilLastMileage), current_mileage:parseInt(vF.oilCurrentMileage), interval_miles:parseInt(vF.oilIntervalMiles), interval_days:parseInt(vF.oilIntervalDays), oil_type:vF.oilType });
+          }
+          await loadAll();
+          setVF(blankV); setShowAddV(false);
+          toast2(`${vF.year} ${vF.make} ${vF.model} registered ✓`);
+        } catch(e) { toast2("Error: " + e.message, true); }
+        setSaving(false);
+      };
+
+      const addDeadline = async () => {
+        if (!dF.vehicleId || !dF.task || !dF.date) return;
+        setSaving(true);
+        try {
+          await db.insert("deadlines", { id:"d"+Date.now(), vehicle_id:dF.vehicleId, type:dF.type, task:dF.task, date:dF.date, notes:dF.notes||"" });
+          await loadAll(); setDF(blankD); setShowAddD(false);
+          toast2("Deadline added ✓");
+        } catch(e) { toast2("Error: " + e.message, true); }
+        setSaving(false);
+      };
+
+      const markDone = async id => {
+        try { await db.remove("deadlines", id); setDeadlines(p => p.filter(d => d.id !== id)); toast2("Marked done ✓"); }
+        catch(e) { toast2("Error", true); }
+      };
+
+      const openLogChange = rec => { setSelOilRec(rec); setLogF({ newMileage:rec.currentMileage, changeDate:new Date().toISOString().split("T")[0], notes:"" }); setShowLogOil(true); };
+
+      const logOilChange = async () => {
+        if (!selOilRec || !logF.newMileage || !logF.changeDate) return;
+        setSaving(true);
+        try {
+          await db.update("oil_records", selOilRec.id, { last_change_date:logF.changeDate, last_change_mileage:parseInt(logF.newMileage), current_mileage:parseInt(logF.newMileage) });
+          await loadAll(); setLogF({ newMileage:"", changeDate:"", notes:"" }); setSelOilRec(null); setShowLogOil(false);
+          toast2("Oil change logged ✓");
+        } catch(e) { toast2("Error: " + e.message, true); }
+        setSaving(false);
+      };
+
+      const overdueOil    = oilRecords.filter(r => oilStatus(r).overallPct >= 100).length;
+      const dueSoonOil    = oilRecords.filter(r => { const p=oilStatus(r).overallPct; return p>=70&&p<100; }).length;
+      const overdueCount  = deadlines.filter(d => daysUntil(d.date) < 0).length;
+      const criticalCount = deadlines.filter(d => daysUntil(d.date) <= 7).length;
+
+      const filteredDl = deadlines.filter(d => typeFilter==="all"||d.type===typeFilter).sort((a,b) => daysUntil(a.date)-daysUntil(b.date));
+      const dlGroups = [
+        { key:"ov", label:"OVERDUE",       color:"#dc2626", items:filteredDl.filter(d=>daysUntil(d.date)<0) },
+        { key:"wk", label:"DUE THIS WEEK", color:"#c2410c", items:filteredDl.filter(d=>{const x=daysUntil(d.date);return x>=0&&x<=7;}) },
+        { key:"2w", label:"NEXT 2 WEEKS",  color:"#d97706", items:filteredDl.filter(d=>{const x=daysUntil(d.date);return x>7&&x<=14;}) },
+        { key:"mo", label:"THIS MONTH",    color:"#ca8a04", items:filteredDl.filter(d=>{const x=daysUntil(d.date);return x>14&&x<=30;}) },
+        { key:"up", label:"30+ DAYS",      color:"#6b7280", items:filteredDl.filter(d=>daysUntil(d.date)>30) },
+      ];
+      const filteredOil = oilRecords.filter(r => {
+        const p = oilStatus(r).overallPct;
+        if (oilFilter==="overdue") return p>=100;
+        if (oilFilter==="soon")    return p>=70&&p<100;
+        if (oilFilter==="ok")      return p<70;
+        return true;
+      }).sort((a,b) => oilStatus(b).overallPct-oilStatus(a).overallPct);
+
+      return (
+        <div style={{ minHeight:"100vh", background:"#f3f4f6", color:"#111827" }}>
+          {toast && (
+            <div style={{ position:"fixed", bottom:22, right:22, background:"#fff", border:`1px solid ${toast.err?"#fca5a5":"#a7f3d0"}`, borderRadius:10, padding:"11px 20px", color:toast.err?"#dc2626":"#059669", fontSize:13, fontWeight:600, zIndex:9999, boxShadow:"0 8px 24px rgba(0,0,0,0.12)", animation:"fadeUp 0.2s ease" }}>
+              {toast.msg}
+            </div>
+          )}
+
+          <nav style={{ background:"#fff", borderBottom:"1px solid #e5e7eb", padding:"0 24px", height:58, display:"flex", alignItems:"center", gap:10, position:"sticky", top:0, zIndex:100, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginRight:6 }}>
+              <div style={{ width:30, height:30, borderRadius:8, background:"linear-gradient(135deg,#2563eb,#7c3aed)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:15 }}>⚡</div>
+              <span style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:19, fontWeight:800, letterSpacing:2, color:"#111827" }}>FLEETCORE</span>
+            </div>
+            {[["command","Command Center"],["maintenance","Oil Changes"],["garage","Vehicles"]].map(([k,l]) => (
+              <button key={k} onClick={() => setView(k)}
+                style={{ background:view===k?"#eff6ff":"transparent", color:view===k?"#2563eb":"#6b7280", border:view===k?"1px solid #bfdbfe":"1px solid transparent", borderRadius:7, padding:"6px 14px", fontFamily:"'DM Sans',sans-serif", fontSize:12, fontWeight:700, cursor:"pointer", position:"relative" }}>
+                {l}
+                {k==="command"&&criticalCount>0&&<span style={{ position:"absolute", top:3, right:3, width:7, height:7, background:"#ef4444", borderRadius:"50%" }}/>}
+                {k==="maintenance"&&overdueOil>0&&<span style={{ position:"absolute", top:3, right:3, width:7, height:7, background:"#ef4444", borderRadius:"50%" }}/>}
+              </button>
+            ))}
+            {(overdueCount+overdueOil)>0&&<div style={{ background:"#fef2f2", border:"1px solid #fca5a5", borderRadius:6, padding:"3px 11px", fontSize:11, color:"#dc2626", fontWeight:700 }}>⚠ {overdueCount+overdueOil} Overdue</div>}
+            <button onClick={loadAll} style={{ ...BTN_G, padding:"7px 12px", fontSize:16, marginLeft:4 }}>↻</button>
+            <div style={{ marginLeft:"auto", display:"flex", gap:8 }}>
+              <button onClick={() => setShowAddV(true)} style={BTN_P}>+ Add Vehicle</button>
+              {view!=="maintenance"&&<button onClick={() => setShowAddD(true)} style={BTN_G}>+ Add Deadline</button>}
+            </div>
+          </nav>
+
+          <div style={{ maxWidth:960, margin:"0 auto", padding:"24px 20px 60px" }}>
+            {dbError&&<div style={{ background:"#fef2f2", border:"1px solid #fca5a5", borderRadius:10, padding:"14px 18px", marginBottom:20, color:"#dc2626", fontSize:13 }}><strong>⚠ Error:</strong> {dbError} <button onClick={loadAll} style={{ marginLeft:12, background:"#dc2626", color:"#fff", border:"none", borderRadius:6, padding:"4px 12px", fontSize:12, cursor:"pointer" }}>Retry</button></div>}
+
+            {loading ? (
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", padding:"80px 0", gap:16 }}>
+                <div style={{ width:36, height:36, border:"3px solid #e5e7eb", borderTop:"3px solid #2563eb", borderRadius:"50%", animation:"spin 0.7s linear infinite" }}/>
+                <div style={{ fontSize:13, color:"#6b7280" }}>Loading fleet data…</div>
+              </div>
+            ) : (
+              <>
+                {view==="command"&&(
+                  <>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:24 }}>
+                      {[
+                        { label:"Fleet Size", val:vehicles.length, color:"#2563eb", bg:"#eff6ff", border:"#bfdbfe", icon:"🚘" },
+                        { label:"Overdue Items", val:overdueCount+overdueOil, color:"#dc2626", bg:"#fef2f2", border:"#fca5a5", icon:"🚨" },
+                        { label:"Oil Changes Due", val:overdueOil+dueSoonOil, color:"#d97706", bg:"#fffbeb", border:"#fde68a", icon:"🛢" },
+                        { label:"Deadlines 30d", val:deadlines.filter(d=>{const x=daysUntil(d.date);return x>=0&&x<=30}).length, color:"#7c3aed", bg:"#f5f3ff", border:"#ddd6fe", icon:"📅" },
+                      ].map(s=>(
+                        <div key={s.label} style={{ background:s.bg, border:`1px solid ${s.border}`, borderRadius:12, padding:"16px 18px", boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
+                          <div style={{ fontSize:18, marginBottom:4 }}>{s.icon}</div>
+                          <div style={{ fontSize:28, fontWeight:800, color:s.color, fontFamily:"'Barlow Condensed',sans-serif", lineHeight:1 }}>{s.val}</div>
+                          <div style={{ fontSize:10, color:s.color, opacity:0.75, textTransform:"uppercase", letterSpacing:1, marginTop:3, fontWeight:700 }}>{s.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {(overdueOil+dueSoonOil)>0&&(
+                      <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:12, padding:"14px 18px", marginBottom:20 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+                          <span style={{ fontSize:13, fontWeight:700, color:"#92400e" }}>🛢 Oil Changes Needing Attention</span>
+                          <button onClick={() => setView("maintenance")} style={{ background:"#d97706", color:"#fff", border:"none", borderRadius:6, padding:"4px 12px", fontSize:11, fontWeight:700, cursor:"pointer" }}>View All →</button>
+                        </div>
+                        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                          {oilRecords.filter(r=>oilStatus(r).overallPct>=70).sort((a,b)=>oilStatus(b).overallPct-oilStatus(a).overallPct).slice(0,4).map(r=>{
+                            const s=oilStatus(r); const v=vById(r.vehicleId);
+                            return <div key={r.id} style={{ background:"#fff", border:`1px solid ${s.urgencyBorder}`, borderRadius:8, padding:"8px 12px" }}><div style={{ fontWeight:700, color:"#111827", fontSize:12 }}>{v?.make} {v?.model}</div><div style={{ fontSize:10, color:s.urgencyColor, fontWeight:700, marginTop:2 }}>{s.urgency} · {s.overallPct}%</div></div>;
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
+                      <button onClick={() => setTypeFilter("all")} style={{ background:typeFilter==="all"?"#2563eb":"#fff", color:typeFilter==="all"?"#fff":"#6b7280", border:"1px solid "+(typeFilter==="all"?"#2563eb":"#d1d5db"), borderRadius:7, padding:"6px 14px", fontSize:12, fontWeight:600, cursor:"pointer" }}>All ({deadlines.length})</button>
+                      {Object.entries(TYPE_CFG).map(([k,t])=>(
+                        <button key={k} onClick={() => setTypeFilter(k)} style={{ background:typeFilter===k?t.bg:"#fff", color:typeFilter===k?t.color:"#6b7280", border:`1px solid ${typeFilter===k?t.border:"#d1d5db"}`, borderRadius:7, padding:"6px 14px", fontSize:12, fontWeight:600, cursor:"pointer" }}>{t.icon} {t.label} ({deadlines.filter(d=>d.type===k).length})</button>
+                      ))}
+                    </div>
+                    {dlGroups.map(g=>g.items.length>0&&(
+                      <div key={g.key}>
+                        <div style={{ display:"flex", alignItems:"center", gap:10, margin:"20px 0 9px" }}>
+                          <div style={{ height:1, flex:1, background:"#e5e7eb" }}/>
+                          <span style={{ fontSize:11, fontWeight:800, color:g.color, fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:1.5 }}>{g.label}</span>
+                          <span style={{ background:"#f3f4f6", color:g.color, border:"1px solid #e5e7eb", borderRadius:10, padding:"1px 9px", fontSize:11, fontWeight:800 }}>{g.items.length}</span>
+                          <div style={{ height:1, flex:1, background:"#e5e7eb" }}/>
+                        </div>
+                        {g.items.map(d=><DeadlineRow key={d.id} item={d} vehicle={vById(d.vehicleId)} onDone={markDone}/>)}
+                      </div>
+                    ))}
+                    {filteredDl.length===0&&<div style={{ textAlign:"center", padding:"50px 0" }}><div style={{ fontSize:36, marginBottom:8 }}>✅</div><div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:20, letterSpacing:2, color:"#059669" }}>ALL CLEAR</div><div style={{ fontSize:13, color:"#9ca3af", marginTop:6 }}>No deadlines. Add vehicles to get started.</div></div>}
+                  </>
+                )}
+
+                {view==="maintenance"&&(
+                  <>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginBottom:22 }}>
+                      {[
+                        { label:"Total Tracked", val:oilRecords.length, color:"#2563eb", bg:"#eff6ff", border:"#bfdbfe", icon:"🛢" },
+                        { label:"Overdue", val:overdueOil, color:"#dc2626", bg:"#fef2f2", border:"#fca5a5", icon:"🚨" },
+                        { label:"Due Soon", val:dueSoonOil, color:"#d97706", bg:"#fffbeb", border:"#fde68a", icon:"⚠️" },
+                        { label:"All Good", val:oilRecords.filter(r=>oilStatus(r).overallPct<70).length, color:"#059669", bg:"#ecfdf5", border:"#a7f3d0", icon:"✅" },
+                      ].map(s=>(
+                        <div key={s.label} style={{ background:s.bg, border:`1px solid ${s.border}`, borderRadius:12, padding:"15px 17px", boxShadow:"0 1px 3px rgba(0,0,0,0.05)" }}>
+                          <div style={{ fontSize:17, marginBottom:3 }}>{s.icon}</div>
+                          <div style={{ fontSize:26, fontWeight:800, color:s.color, fontFamily:"'Barlow Condensed',sans-serif", lineHeight:1 }}>{s.val}</div>
+                          <div style={{ fontSize:10, color:s.color, opacity:0.75, textTransform:"uppercase", letterSpacing:1, marginTop:3, fontWeight:700 }}>{s.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:10, padding:"12px 16px", marginBottom:18, fontSize:12, color:"#1e40af" }}>
+                      <strong>How it works:</strong> Tracks oil by <strong>mileage</strong> AND <strong>time</strong> — whichever hits first triggers the alert. Hover a card → <strong>✓ Log Oil Change</strong> to reset.
+                    </div>
+                    <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+                      {[["all","All",oilRecords.length,"#6b7280","#f9fafb","#e5e7eb"],["overdue","Overdue",overdueOil,"#dc2626","#fef2f2","#fca5a5"],["soon","Due Soon",dueSoonOil,"#d97706","#fffbeb","#fde68a"],["ok","All Good",oilRecords.filter(r=>oilStatus(r).overallPct<70).length,"#059669","#ecfdf5","#a7f3d0"]].map(([k,l,ct,c,bg,b])=>(
+                        <button key={k} onClick={() => setOilFilter(k)} style={{ background:oilFilter===k?bg:"#fff", color:oilFilter===k?c:"#6b7280", border:`1px solid ${oilFilter===k?b:"#d1d5db"}`, borderRadius:7, padding:"6px 14px", fontSize:12, fontWeight:600, cursor:"pointer" }}>{l} ({ct})</button>
+                      ))}
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(320px,1fr))", gap:14 }}>
+                      {filteredOil.map(r=><OilChangeCard key={r.id} record={r} vehicle={vById(r.vehicleId)} onLogChange={openLogChange}/>)}
+                      {filteredOil.length===0&&<div style={{ gridColumn:"1/-1", textAlign:"center", padding:"50px 0", color:"#9ca3af" }}><div style={{ fontSize:32, marginBottom:8 }}>🛢</div><div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:18 }}>NO RECORDS HERE</div></div>}
+                    </div>
+                  </>
+                )}
+
+                {view==="garage"&&(
+                  <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))", gap:12 }}>
+                    {vehicles.map(v=>{
+                      const sc=STATUS_CFG[v.status];
+                      const vDl=deadlines.filter(d=>d.vehicleId===v.id);
+                      const vOil=oilRecords.find(r=>r.vehicleId===v.id);
+                      const oilS=vOil?oilStatus(vOil):null;
+                      const overdue=vDl.filter(d=>daysUntil(d.date)<0).length+(oilS?.overallPct>=100?1:0);
+                      const upcoming=vDl.filter(d=>{const x=daysUntil(d.date);return x>=0&&x<=30;}).length;
+                      return (
+                        <div key={v.id} style={{ background:"#fff", border:`1px solid ${overdue?"#fca5a5":"#e5e7eb"}`, borderRadius:12, padding:"16px 18px", boxShadow:"0 1px 4px rgba(0,0,0,0.06)" }}>
+                          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+                            <div>
+                              <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:16, fontWeight:800, color:"#111827" }}>{v.year} {v.make} {v.model}</div>
+                              <div style={{ fontSize:11, color:"#6b7280", marginTop:1 }}>{v.plate} · {v.color}</div>
+                            </div>
+                            <span style={{ background:sc.bg, color:sc.color, border:`1px solid ${sc.border}`, fontSize:10, fontWeight:700, padding:"3px 9px", borderRadius:20 }}>{sc.label}</span>
+                          </div>
+                          <div style={{ fontSize:9, color:"#d1d5db", fontFamily:"monospace", wordBreak:"break-all", marginBottom:10 }}>VIN {v.vin}</div>
+                          {oilS&&(
+                            <div style={{ background:oilS.urgencyBg, border:`1px solid ${oilS.urgencyBorder}`, borderRadius:7, padding:"7px 10px", marginBottom:8 }}>
+                              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+                                <span style={{ fontSize:10, fontWeight:700, color:"#374151" }}>🛢 Oil Change</span>
+                                <span style={{ fontSize:10, fontWeight:800, color:oilS.urgencyColor }}>{oilS.urgency} · {oilS.overallPct}%</span>
+                              </div>
+                              <ProgressBar pct={oilS.overallPct}/>
+                            </div>
+                          )}
+                          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                            {overdue>0&&<span style={{ background:"#fef2f2", color:"#dc2626", border:"1px solid #fca5a5", fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4 }}>⚠ {overdue} overdue</span>}
+                            {upcoming>0&&<span style={{ background:"#fffbeb", color:"#d97706", border:"1px solid #fde68a", fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4 }}>⏰ {upcoming} due soon</span>}
+                            {overdue===0&&upcoming===0&&!oilS&&<span style={{ background:"#ecfdf5", color:"#059669", border:"1px solid #a7f3d0", fontSize:10, fontWeight:700, padding:"2px 8px", borderRadius:4 }}>✓ All clear</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {vehicles.length===0&&<div style={{ gridColumn:"1/-1", textAlign:"center", padding:"60px 0", color:"#9ca3af" }}><div style={{ fontSize:40, marginBottom:10 }}>🚘</div><div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontSize:20, letterSpacing:2 }}>NO VEHICLES YET</div><div style={{ fontSize:13, marginTop:6 }}>Click "+ Add Vehicle" to get started.</div></div>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {showLogOil&&selOilRec&&(
+            <Modal title="LOG OIL CHANGE" onClose={() => { setShowLogOil(false); setSelOilRec(null); }}>
+              {(()=>{ const v=vById(selOilRec.vehicleId); return <div style={{ background:"#f9fafb", borderRadius:10, padding:"12px 14px", marginBottom:18, border:"1px solid #e5e7eb" }}><div style={{ fontWeight:700, color:"#111827" }}>{v?.year} {v?.make} {v?.model} · {v?.plate}</div><div style={{ fontSize:11, color:"#6b7280", marginTop:2 }}>Previous: {fmt(selOilRec.lastChangeDate)} at {selOilRec.lastChangeMileage.toLocaleString()} mi</div></div>; })()}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:13 }}>
+                <Field label="New Mileage *"><input style={INPUT} type="number" value={logF.newMileage} onChange={e=>setLogF(p=>({...p,newMileage:e.target.value}))}/></Field>
+                <Field label="Date of Change *"><input style={INPUT} type="date" value={logF.changeDate} onChange={e=>setLogF(p=>({...p,changeDate:e.target.value}))}/></Field>
+                <Field label="Notes" span={2}><input style={INPUT} placeholder="Shop, oil brand…" value={logF.notes} onChange={e=>setLogF(p=>({...p,notes:e.target.value}))}/></Field>
+              </div>
+              <div style={{ display:"flex", gap:10, marginTop:20, justifyContent:"flex-end" }}>
+                <button onClick={() => { setShowLogOil(false); setSelOilRec(null); }} style={BTN_G}>Cancel</button>
+                <button onClick={logOilChange} disabled={saving} style={{ ...BTN_P, background:"#059669", opacity:saving?0.7:1 }}>{saving?"Saving…":"Save Oil Change"}</button>
+              </div>
+            </Modal>
+          )}
+
+          {showAddV&&(
+            <Modal title="REGISTER VEHICLE" onClose={() => setShowAddV(false)}>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:13 }}>
+                <Field label="VIN *" span={2}><input style={INPUT} placeholder="17-character VIN" value={vF.vin} maxLength={17} onChange={e=>setVF(p=>({...p,vin:e.target.value.toUpperCase()}))}/></Field>
+                <Field label="Year *"><input style={INPUT} placeholder="2024" value={vF.year} onChange={e=>setVF(p=>({...p,year:e.target.value}))}/></Field>
+                <Field label="Make *"><input style={INPUT} placeholder="Toyota" value={vF.make} onChange={e=>setVF(p=>({...p,make:e.target.value}))}/></Field>
+                <Field label="Model *"><input style={INPUT} placeholder="Camry" value={vF.model} onChange={e=>setVF(p=>({...p,model:e.target.value}))}/></Field>
+                <Field label="Plate *"><input style={INPUT} placeholder="RNT-013" value={vF.plate} onChange={e=>setVF(p=>({...p,plate:e.target.value.toUpperCase()}))}/></Field>
+                <Field label="Color"><input style={INPUT} placeholder="Silver" value={vF.color} onChange={e=>setVF(p=>({...p,color:e.target.value}))}/></Field>
+                <Field label="Status"><select style={INPUT} value={vF.status} onChange={e=>setVF(p=>({...p,status:e.target.value}))}><option value="available">Available</option><option value="rented">Rented</option><option value="maintenance">In Service</option></select></Field>
+              </div>
+              <div style={{ marginTop:16, paddingTop:16, borderTop:"1px solid #f3f4f6" }}>
+                <div style={{ fontSize:10, color:"#9ca3af", textTransform:"uppercase", letterSpacing:1.2, marginBottom:12, fontWeight:700 }}>🛢 Oil Change Tracking (optional)</div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                  <Field label="Last Change Date"><input type="date" style={INPUT} value={vF.oilLastDate} onChange={e=>setVF(p=>({...p,oilLastDate:e.target.value}))}/></Field>
+                  <Field label="Mileage at Last Change"><input type="number" style={INPUT} placeholder="e.g. 45000" value={vF.oilLastMileage} onChange={e=>setVF(p=>({...p,oilLastMileage:e.target.value}))}/></Field>
+                  <Field label="Current Mileage"><input type="number" style={INPUT} placeholder="e.g. 47500" value={vF.oilCurrentMileage} onChange={e=>setVF(p=>({...p,oilCurrentMileage:e.target.value}))}/></Field>
+                  <Field label="Oil Type"><input style={INPUT} placeholder="Synthetic 5W-30" value={vF.oilType} onChange={e=>setVF(p=>({...p,oilType:e.target.value}))}/></Field>
+                  <Field label="Change Every (miles)"><select style={INPUT} value={vF.oilIntervalMiles} onChange={e=>setVF(p=>({...p,oilIntervalMiles:e.target.value}))}><option value="3000">3,000 miles</option><option value="5000">5,000 miles</option><option value="7500">7,500 miles</option><option value="10000">10,000 miles</option></select></Field>
+                  <Field label="Change Every (time)"><select style={INPUT} value={vF.oilIntervalDays} onChange={e=>setVF(p=>({...p,oilIntervalDays:e.target.value}))}><option value="90">3 months</option><option value="180">6 months</option><option value="365">12 months</option></select></Field>
+                </div>
+                <div style={{ marginTop:12, paddingTop:12, borderTop:"1px solid #f3f4f6" }}>
+                  <div style={{ fontSize:10, color:"#9ca3af", textTransform:"uppercase", letterSpacing:1.2, marginBottom:10, fontWeight:700 }}>Deadlines (optional)</div>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+                    <Field label="📋 Reg. Renewal"><input type="date" style={INPUT} value={vF.regDue} onChange={e=>setVF(p=>({...p,regDue:e.target.value}))}/></Field>
+                    <Field label="🔑 Lease End"><input type="date" style={INPUT} value={vF.leaseEnd} onChange={e=>setVF(p=>({...p,leaseEnd:e.target.value}))}/></Field>
+                  </div>
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:10, marginTop:20, justifyContent:"flex-end" }}>
+                <button onClick={() => setShowAddV(false)} style={BTN_G}>Cancel</button>
+                <button onClick={addVehicle} disabled={saving} style={{ ...BTN_P, opacity:saving?0.7:1 }}>{saving?"Saving…":"Register Vehicle"}</button>
+              </div>
+            </Modal>
+          )}
+
+          {showAddD&&(
+            <Modal title="ADD DEADLINE" onClose={() => setShowAddD(false)}>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:13 }}>
+                <Field label="Vehicle *"><select style={INPUT} value={dF.vehicleId} onChange={e=>setDF(p=>({...p,vehicleId:e.target.value}))}><option value="">Select vehicle…</option>{vehicles.map(v=><option key={v.id} value={v.id}>{v.year} {v.make} {v.model} ({v.plate})</option>)}</select></Field>
+                <Field label="Type"><select style={INPUT} value={dF.type} onChange={e=>setDF(p=>({...p,type:e.target.value}))}><option value="maintenance">🔧 Maintenance</option><option value="registration">📋 Registration</option><option value="lease">🔑 Lease Return</option></select></Field>
+                <Field label="Task *"><input style={INPUT} placeholder="Tire rotation, brake check…" value={dF.task} onChange={e=>setDF(p=>({...p,task:e.target.value}))}/></Field>
+                <Field label="Due Date *"><input type="date" style={INPUT} value={dF.date} onChange={e=>setDF(p=>({...p,date:e.target.value}))}/></Field>
+                <Field label="Notes / Shop" span={2}><input style={INPUT} placeholder="Shop name, location…" value={dF.notes} onChange={e=>setDF(p=>({...p,notes:e.target.value}))}/></Field>
+              </div>
+              <div style={{ display:"flex", gap:10, marginTop:20, justifyContent:"flex-end" }}>
+                <button onClick={() => setShowAddD(false)} style={BTN_G}>Cancel</button>
+                <button onClick={addDeadline} disabled={saving} style={{ ...BTN_P, opacity:saving?0.7:1 }}>{saving?"Saving…":"Save Deadline"}</button>
+              </div>
+            </Modal>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
